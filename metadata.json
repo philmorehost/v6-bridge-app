@@ -1,0 +1,15 @@
+{
+  "name": "DGV6 Bridge v2.0 Mobile Gateway",
+  "description": "Premium Fintech SMS Gateway Mobile App interface for DGV6.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "nativePermissions": [
+    "android.permission.RECEIVE_SMS",
+    "android.permission.FOREGROUND_SERVICE",
+    "android.permission.WAKE_LOCK",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    "android.permission.RECEIVE_BOOT_COMPLETED"
+  ]
+}
