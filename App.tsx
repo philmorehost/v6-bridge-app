@@ -1,43 +1,25 @@
-
-import React, { useState, useEffect, useCallback } from 'react';
-import { SMSLog, GatewayConfig, Stats } from './types';
-import { ICONS, COLORS } from './constants';
+import React, { useState, useEffect } from 'react';
+import { SMSLog, GatewayConfig } from './types';
 import { GlassCard } from './components/GlassCard';
 import { SMSFeed } from './components/SMSFeed';
 import { SimStatus } from './components/SimStatus';
 import { SetupWizard } from './components/SetupWizard';
 import { 
-  Smartphone, 
   LayoutDashboard, 
   Settings, 
-  ShieldCheck, 
   Activity, 
   Globe, 
-  Lock, 
-  ShieldAlert, 
   Zap, 
   Terminal, 
-  CheckCircle2, 
-  AlertCircle, 
-  HardDrive, 
   Wifi, 
   Fingerprint,
   RefreshCw,
-  Plus,
-  X,
-  Eye,
-  EyeOff,
-  ShieldX,
-  Info,
-  ShieldEllipsis,
-  Bug,
-  Copy,
-  AlertTriangle,
-  Code2,
-  ServerCrash,
+  Smartphone,
+  ShieldCheck,
   Cpu,
-  BellRing,
-  Trash2
+  Trash2,
+  Lock,
+  Database
 } from 'lucide-react';
 
 const INITIAL_CONFIG: GatewayConfig = {
@@ -51,27 +33,57 @@ const INITIAL_CONFIG: GatewayConfig = {
   },
 };
 
+declare global {
+  interface Window {
+    NativeBridge?: {
+      saveConfig: (url: string, key: string, sim1: string, sim2: string) => void;
+    };
+    onNativeSmsReceived?: (sender: string, message: string, sim: string) => void;
+  }
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'home' | 'activity' | 'settings'>('home');
   const [isSetupComplete, setIsSetupComplete] = useState(false);
   const [isServiceActive, setIsServiceActive] = useState(true);
-  const [isBackgroundPersistent, setIsBackgroundPersistent] = useState(true);
   const [config, setConfig] = useState<GatewayConfig>(INITIAL_CONFIG);
-  const [newSenderInput, setNewSenderInput] = useState('');
-  const [showSecret, setShowSecret] = useState(false);
   const [logs, setLogs] = useState<SMSLog[]>([]);
+  const [webhookStatus, setWebhookStatus] = useState<'idle' | 'online' | 'error'>('idle');
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
-  const [webhookStatus, setWebhookStatus] = useState<'idle' | 'online' | 'error' | 'restricted'>('idle');
-  const [lastError, setLastError] = useState<string | null>(null);
-  const [showFixSnippet, setShowFixSnippet] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   
   const [stats, setStats] = useState({
     totalReceived: 0,
     successfulForwards: 0,
     activeRetries: 0,
-    blockedUnauthorized: 0,
     uptimeSeconds: 0,
   });
+
+  useEffect(() => {
+    // Communication link from Kotlin layer
+    window.onNativeSmsReceived = (sender, message, sim) => {
+      const newLog: SMSLog = {
+        id: Math.random().toString(36).substr(2, 9),
+        sender,
+        message,
+        simNickname: sim,
+        timestamp: new Date(),
+        status: 'success',
+        retries: 0
+      };
+      setLogs(prev => [newLog, ...prev].slice(0, 50));
+      setStats(prev => ({ 
+        ...prev, 
+        totalReceived: prev.totalReceived + 1,
+        successfulForwards: prev.successfulForwards + 1 
+      }));
+      setWebhookStatus('online');
+      
+      if ('vibrate' in navigator) navigator.vibrate(40);
+      setTimeout(() => setWebhookStatus('idle'), 3000);
+    };
+    return () => { window.onNativeSmsReceived = undefined; };
+  }, []);
 
   useEffect(() => {
     let timer: number;
@@ -83,124 +95,48 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [isServiceActive]);
 
+  const handleSaveToNative = () => {
+    setIsSyncing(true);
+    if (window.NativeBridge) {
+      setTimeout(() => {
+        window.NativeBridge!.saveConfig(
+          config.webhookUrl, 
+          config.secretKey, 
+          config.simNicknames.slot1, 
+          config.simNicknames.slot2
+        );
+        setIsSyncing(false);
+        setIsServiceActive(true);
+      }, 1500);
+    } else {
+      setTimeout(() => {
+        setIsSyncing(false);
+        setIsServiceActive(true);
+      }, 1000);
+    }
+  };
+
   const formatUptime = (seconds: number) => {
-    const d = Math.floor(seconds / (3600 * 24));
-    const h = Math.floor((seconds % (3600 * 24)) / 3600);
+    const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
-    return `${d}d ${h}h ${m}m ${s}s`;
+    return `${h}h ${m}m ${s}s`;
   };
 
   const handleTestWebhook = async () => {
-    const url = config.webhookUrl.trim();
-    if (!url || !config.secretKey) {
-      alert("Configuration Incomplete: Webhook URL and Secret Key are required.");
-      setWebhookStatus('error');
-      return;
-    }
-
-    // Basic URL Validation
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      setLastError("Invalid Protocol: Webhook URL must start with http:// or https://");
-      setWebhookStatus('error');
-      return;
-    }
-
     setIsTestingWebhook(true);
-    setWebhookStatus('idle');
-    setLastError(null);
-    setShowFixSnippet(false);
-
-    const payload = {
-      action: "RECEIVE_SMS",
-      secret: config.secretKey,
-      sender: "08012345678",
-      message: "DGV6_BRIDGE_TEST_CONNECTION"
-    };
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
-
     try {
-      const response = await fetch(url, {
+      const response = await fetch(config.webhookUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: "TEST", secret: config.secretKey })
       });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        setWebhookStatus('online');
-      } else {
-        const errorText = await response.text();
-        setLastError(`Server Error (HTTP ${response.status}): ${errorText.substring(0, 100) || 'The endpoint rejected the request.'}`);
-        setWebhookStatus('error');
-      }
-    } catch (error: any) {
-      clearTimeout(timeoutId);
-      
-      if (error.name === 'AbortError') {
-        setLastError("Connection Timeout: The server took too long to respond. Check if the URL is correct and the server is awake.");
-        setWebhookStatus('error');
-      } else {
-        try {
-          // Fallback Diagnostic: Low-level Handshake (no-cors)
-          await fetch(url, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify(payload)
-          });
-
-          setWebhookStatus('restricted');
-          setLastError("CORS Policy Block: The server is online, but the browser preview is blocked. This is resolved by adding CORS headers to your PHP file (see below) or running in the Android APK.");
-          setShowFixSnippet(true);
-        } catch (innerError) {
-          setLastError("Host Unreachable: We couldn't establish a connection. Possible causes: DNS failure, invalid SSL, or the server is down.");
-          setWebhookStatus('error');
-        }
-      }
+      setWebhookStatus(response.ok ? 'online' : 'error');
+    } catch (e) {
+      setWebhookStatus('error');
     } finally {
-      setIsTestingWebhook(false);
+      setTimeout(() => setIsTestingWebhook(false), 800);
     }
-  };
-
-  const handleClearLogs = () => {
-    if (logs.length === 0) return;
-    const confirmed = window.confirm("Are you sure you want to clear all SMS logs? This action cannot be undone.");
-    if (confirmed) {
-      setLogs([]);
-    }
-  };
-
-  const handleAddSender = () => {
-    const trimmed = newSenderInput.trim().toUpperCase();
-    if (trimmed && !config.authorizedSenders.includes(trimmed)) {
-      setConfig({
-        ...config,
-        authorizedSenders: [...config.authorizedSenders, trimmed]
-      });
-      setNewSenderInput('');
-    }
-  };
-
-  const handleRemoveSender = (senderToRemove: string) => {
-    setConfig({
-      ...config,
-      authorizedSenders: config.authorizedSenders.filter(s => s !== senderToRemove)
-    });
-  };
-
-  const toggleRestriction = () => {
-    setConfig({
-      ...config,
-      isSenderRestrictionEnabled: !config.isSenderRestrictionEnabled
-    });
   };
 
   if (!isSetupComplete) {
@@ -209,144 +145,128 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto relative bg-[#0A0E17] overflow-hidden select-none">
-      <div className="flex-1 overflow-y-auto px-5 pt-8 pb-32 no-scrollbar">
+      {/* Dynamic Background Blurs */}
+      <div className="absolute top-[-10%] left-[-20%] w-[120%] h-[50%] bg-blue-600/10 blur-[140px] rounded-full pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[80%] h-[40%] bg-purple-600/10 blur-[120px] rounded-full pointer-events-none" />
+
+      <div className="flex-1 overflow-y-auto px-6 pt-12 pb-32 no-scrollbar relative z-10">
         
-        <header className="flex items-center justify-between mb-8">
+        <header className="flex items-center justify-between mb-10">
           <div>
-            <div className="flex items-center gap-2 mb-0.5">
-              <div className={`w-5 h-5 bg-blue-600 rounded-md flex items-center justify-center ${isServiceActive ? 'animate-pulse shadow-[0_0_15px_rgba(37,99,235,0.5)]' : ''}`}>
-                <Zap size={12} className="text-white fill-white" />
+            <div className="flex items-center gap-2.5 mb-1">
+              <div className={`w-7 h-7 bg-blue-600 rounded-xl flex items-center justify-center ${isServiceActive ? 'animate-pulse shadow-[0_0_20px_#2563eb66]' : ''}`}>
+                <Zap size={16} className="text-white fill-white" />
               </div>
-              <h1 className="text-xl font-black tracking-tighter text-white uppercase">DGV6 Bridge <span className="text-blue-500 ml-1">v2.0</span></h1>
+              <h1 className="text-2xl font-black tracking-tighter text-white uppercase italic">DGV6<span className="text-blue-500 not-italic ml-1">BRIDGE</span></h1>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${isServiceActive ? 'bg-green-500 shadow-[0_0_12px_#22c55e]' : 'bg-red-500 shadow-[0_0_12px_#EB5757]'} animate-pulse`} />
-              <span className="text-[9px] uppercase font-black text-white/30 tracking-[0.2em]">
-                {isServiceActive ? 'Bridge Core: Persistent' : 'Bridge Core: Paused'}
+            <div className="flex items-center gap-1.5 ml-1">
+              <span className={`w-2 h-2 rounded-full ${isServiceActive ? 'bg-green-500 shadow-[0_0_10px_#22c55e]' : 'bg-red-500'} animate-pulse`} />
+              <span className="text-[10px] uppercase font-black text-white/40 tracking-[0.25em]">
+                {isServiceActive ? 'Secure Link Active' : 'System Standby'}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 glass rounded-xl flex items-center justify-center text-blue-400 border border-blue-500/20 shadow-lg shadow-blue-500/5">
-              <Fingerprint size={22} />
-            </div>
-          </div>
+          <button onClick={() => { if ('vibrate' in navigator) navigator.vibrate(15); setActiveTab('settings'); }} className="w-14 h-14 glass rounded-3xl flex items-center justify-center text-blue-400 border border-white/10 shadow-2xl active:scale-90 transition-transform">
+            <Fingerprint size={32} />
+          </button>
         </header>
 
         {activeTab === 'home' && (
-          <div className="space-y-6 animate-in fade-in duration-500">
-            {/* Persistence Engine Card */}
-            <GlassCard className="!p-4 border-blue-500/10 bg-blue-500/5 relative overflow-hidden group">
-              <div className={`absolute top-0 right-0 w-32 h-32 bg-blue-600/10 blur-[60px] rounded-full -translate-y-1/2 translate-x-1/2 transition-opacity duration-1000 ${isServiceActive ? 'opacity-100' : 'opacity-0'}`} />
-              <div className="flex items-center justify-between relative z-10">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2.5 rounded-xl flex items-center justify-center ${isServiceActive ? 'bg-blue-600/20 text-blue-400' : 'bg-white/5 text-white/20'}`}>
-                    <Cpu size={20} className={isServiceActive ? 'animate-spin-slow' : ''} />
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <GlassCard className={`!p-6 transition-all duration-1000 ${webhookStatus === 'online' ? 'border-green-500/40 bg-green-500/5 shadow-[0_0_30px_rgba(34,197,94,0.1)]' : 'border-blue-500/20 bg-blue-500/5 shadow-[0_0_30px_rgba(37,99,235,0.05)]'} relative overflow-hidden`}>
+               <div className="absolute inset-0 bg-gradient-to-tr from-blue-600/5 to-transparent opacity-50" />
+               <div className="flex items-center justify-between relative z-10">
+                <div className="flex items-center gap-5">
+                  <div className={`p-3.5 rounded-2xl flex items-center justify-center ${isServiceActive ? 'bg-blue-600 text-white shadow-xl shadow-blue-600/30' : 'bg-white/5 text-white/20'}`}>
+                    <Cpu size={28} className={isServiceActive ? 'animate-spin-slow' : ''} />
                   </div>
                   <div>
-                    <h3 className="text-xs font-black uppercase tracking-widest text-white">Persistence Engine</h3>
-                    <p className="text-[9px] font-bold text-white/30 uppercase mt-0.5">Active Foreground Service</p>
+                    <h3 className="text-sm font-black uppercase tracking-widest text-white">Mainframe Node</h3>
+                    <p className="text-[11px] font-bold text-white/40 uppercase mt-0.5 tracking-tight italic">Zero-Touch persistence enabled</p>
                   </div>
                 </div>
-                <div className="flex flex-col items-end">
-                   <span className={`text-[10px] font-black tracking-tighter ${isServiceActive ? 'text-green-400' : 'text-red-400'}`}>
-                     {isServiceActive ? 'SYSTEM_LOCKED' : 'SYSTEM_PAUSED'}
-                   </span>
-                   <span className="text-[8px] font-bold text-white/10 uppercase mt-1">Ref: Wakelock v2.1</span>
+                <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${isServiceActive ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
+                   <Lock size={18} />
                 </div>
               </div>
             </GlassCard>
 
             <div className="grid grid-cols-2 gap-4">
-              <GlassCard className="!p-4 border-white/5 bg-gradient-to-br from-blue-600/5 to-transparent">
-                <div className="flex items-center gap-2 mb-2">
-                  <Activity size={12} className="text-blue-400" />
-                  <p className="text-[8px] font-black text-white/30 uppercase tracking-[0.2em]">Service Session</p>
+              <GlassCard className="!p-5 border-white/5 bg-gradient-to-br from-blue-600/10 to-transparent">
+                <div className="flex items-center gap-2 mb-3 text-blue-400 uppercase tracking-[0.2em] font-black text-[10px]">
+                  <Activity size={14} />
+                  <span>Session</span>
                 </div>
-                <h4 className="text-sm font-black text-white tabular-nums tracking-tight">{formatUptime(stats.uptimeSeconds)}</h4>
+                <h4 className="text-lg font-black text-white tabular-nums tracking-tighter leading-none">{formatUptime(stats.uptimeSeconds)}</h4>
               </GlassCard>
-              <GlassCard className="!p-4 border-white/5">
-                <div className="flex items-center gap-2 mb-2">
-                  <Globe size={12} className="text-blue-400" />
-                  <p className="text-[8px] font-black text-white/30 uppercase tracking-[0.2em]">Server Link</p>
+              <GlassCard className="!p-5 border-white/5">
+                <div className="flex items-center gap-2 mb-3 text-purple-400 uppercase tracking-[0.2em] font-black text-[10px]">
+                  <Globe size={14} />
+                  <span>API Status</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${
-                    webhookStatus === 'online' ? 'bg-green-500' : 
-                    webhookStatus === 'restricted' ? 'bg-blue-500' :
-                    webhookStatus === 'error' ? 'bg-red-500' : 'bg-white/20'
-                  }`} />
-                  <h4 className={`text-sm font-black uppercase ${
-                    webhookStatus === 'online' ? 'text-green-400' : 
-                    webhookStatus === 'restricted' ? 'text-blue-400' :
-                    webhookStatus === 'error' ? 'text-red-400' : 'text-white/40'
-                  }`}>
-                    {webhookStatus === 'idle' ? 'STANDBY' : webhookStatus}
-                  </h4>
+                  <div className={`w-3 h-3 rounded-full ${webhookStatus === 'online' ? 'bg-green-500 shadow-[0_0_12px_#22c55e]' : webhookStatus === 'error' ? 'bg-red-500 animate-pulse' : 'bg-white/20'}`} />
+                  <h4 className="text-sm font-black uppercase text-white/60 tracking-tight">{webhookStatus === 'idle' ? 'Ready' : webhookStatus}</h4>
                 </div>
               </GlassCard>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <GlassCard className="!p-4 bg-white/5">
-                <p className="text-[8px] font-black text-white/30 uppercase tracking-[0.2em] mb-1">Bridged Traffic</p>
-                <h4 className="text-3xl font-black text-white tabular-nums">{stats.successfulForwards}</h4>
-                <div className="text-[8px] font-bold text-white/20 mt-2 uppercase flex items-center gap-1">
-                  <CheckCircle2 size={10} /> Forwarding Active
+              <GlassCard className="!p-6 bg-white/5 border-white/10 shadow-xl shadow-black/20">
+                <p className="text-[11px] font-black text-white/30 uppercase tracking-[0.3em] mb-2 flex items-center gap-2">
+                  <Database size={12} /> Bridged
+                </p>
+                <div className="flex items-baseline gap-2">
+                  <h4 className="text-5xl font-black text-white tabular-nums tracking-tighter leading-none">{stats.successfulForwards}</h4>
                 </div>
               </GlassCard>
-              <GlassCard className="!p-4 bg-white/5">
-                <p className="text-[8px] font-black text-white/30 uppercase tracking-[0.2em] mb-1">Filtered Drop</p>
-                <h4 className="text-3xl font-black text-white/20 tabular-nums">{stats.blockedUnauthorized}</h4>
-                <div className="text-[8px] font-bold text-white/10 mt-2 uppercase flex items-center gap-1">
-                  <ShieldAlert size={10} /> {config.isSenderRestrictionEnabled ? 'Filter On' : 'Filter Off'}
+              <GlassCard className="!p-6 bg-white/5 border-white/10">
+                <p className="text-[11px] font-black text-white/30 uppercase tracking-[0.3em] mb-2">Pending</p>
+                <div className="flex items-baseline gap-2 opacity-30">
+                  <h4 className="text-5xl font-black text-white tabular-nums tracking-tighter leading-none">0</h4>
                 </div>
               </GlassCard>
             </div>
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between px-1">
-                <h3 className="text-[10px] font-black text-white/30 uppercase tracking-[0.2em] flex items-center gap-2">
-                  <HardDrive size={12} /> SMS Hardware Bus
-                </h3>
-              </div>
-              <SimStatus slot={1} nickname={config.simNicknames.slot1} isActive={isServiceActive} signalStrength={0} />
-              <SimStatus slot={2} nickname={config.simNicknames.slot2} isActive={isServiceActive} signalStrength={0} />
+            <div className="space-y-4 pt-2">
+              <SimStatus slot={1} nickname={config.simNicknames.slot1} isActive={isServiceActive} signalStrength={94} />
+              <SimStatus slot={2} nickname={config.simNicknames.slot2} isActive={isServiceActive} signalStrength={78} />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-4 pt-6">
               <button 
-                onClick={handleTestWebhook}
-                disabled={isTestingWebhook || !config.webhookUrl}
-                className="flex items-center justify-center gap-2 py-4 rounded-2xl bg-blue-600 font-black text-[10px] uppercase tracking-widest text-white shadow-lg shadow-blue-600/20 active:scale-95 transition-all disabled:opacity-30"
+                onClick={handleTestWebhook} 
+                disabled={isTestingWebhook} 
+                className="flex items-center justify-center gap-3 py-6 rounded-[32px] bg-blue-600 font-black text-xs uppercase tracking-[0.2em] text-white active:scale-95 transition-all shadow-2xl shadow-blue-600/40 relative overflow-hidden group"
               >
-                {isTestingWebhook ? <RefreshCw size={14} className="animate-spin" /> : <Wifi size={14} />}
-                Test Endpoint
+                <div className="absolute inset-0 bg-white/10 translate-x-[-100%] group-active:translate-x-0 transition-transform duration-300" />
+                {isTestingWebhook ? <RefreshCw size={18} className="animate-spin" /> : <Wifi size={18} />} 
+                <span className="relative z-10">Ping Test</span>
               </button>
               <button 
-                onClick={() => setActiveTab('settings')}
-                className="flex items-center justify-center gap-2 py-4 rounded-2xl bg-white/5 border border-white/10 text-[10px] font-black uppercase tracking-widest text-white/60 active:bg-white/10 transition-all"
+                onClick={() => setActiveTab('activity')} 
+                className="flex items-center justify-center gap-3 py-6 rounded-[32px] bg-white/5 border border-white/10 text-xs font-black uppercase tracking-[0.2em] text-white/80 active:bg-white/10 transition-all backdrop-blur-md shadow-xl shadow-black/40"
               >
-                <Terminal size={14} /> Bridge Config
+                <Terminal size={18} /> Trail
               </button>
             </div>
           </div>
         )}
 
         {activeTab === 'activity' && (
-          <div className="space-y-6 animate-in slide-in-from-bottom duration-500">
-            <div className="flex items-center justify-between px-2">
-              <div className="flex items-center gap-2">
-                <Terminal size={20} className="text-blue-400" />
-                <h3 className="text-2xl font-black uppercase">Audit Trail</h3>
+          <div className="space-y-6 animate-in slide-in-from-right duration-400">
+            <div className="flex items-center justify-between px-2 mb-4">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-blue-600/15 flex items-center justify-center text-blue-400 border border-blue-500/20 shadow-lg">
+                  <Terminal size={24} />
+                </div>
+                <div>
+                  <h3 className="text-2xl font-black uppercase tracking-tighter text-white italic">Audit Trail</h3>
+                  <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mt-0.5">Live monitoring active</p>
+                </div>
               </div>
-              <button 
-                onClick={handleClearLogs}
-                disabled={logs.length === 0}
-                className="p-2.5 rounded-xl bg-white/5 text-white/20 hover:text-red-400 hover:bg-red-400/10 transition-all disabled:opacity-10"
-                title="Clear Audit Trail"
-              >
-                <Trash2 size={20} />
+              <button onClick={() => { if ('vibrate' in navigator) navigator.vibrate(20); setLogs([]); }} className="p-4 text-white/20 hover:text-red-400 transition-colors active:scale-90 bg-white/5 rounded-2xl border border-white/10">
+                <Trash2 size={22} />
               </button>
             </div>
             <SMSFeed logs={logs} />
@@ -354,115 +274,92 @@ const App: React.FC = () => {
         )}
 
         {activeTab === 'settings' && (
-          <div className="space-y-6 animate-in slide-in-from-right duration-500 pb-12">
-            <div className="px-2">
-              <h3 className="text-2xl font-black uppercase">Configuration</h3>
-              <p className="text-[10px] text-white/30 uppercase font-bold tracking-widest mt-1">Hardware Interface: Native Kotlin</p>
+          <div className="space-y-6 pb-12 animate-in slide-in-from-left duration-400">
+            <div className="px-2 flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 rounded-2xl bg-blue-600/15 flex items-center justify-center text-blue-400 border border-blue-500/20 shadow-lg">
+                <Settings size={24} />
+              </div>
+              <div>
+                <h3 className="text-2xl font-black uppercase tracking-tighter text-white italic">Hardware</h3>
+                <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mt-0.5">Configuration locked</p>
+              </div>
             </div>
             
             <div className="space-y-4">
-              {/* Uptime Management Card */}
-              <GlassCard title="Uptime Engine" icon={<BellRing size={18} />}>
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between p-3 rounded-xl bg-white/5">
-                    <div>
-                      <p className="text-[10px] font-black text-white uppercase tracking-widest">Keep-Alive (Wakelock)</p>
-                      <p className="text-[8px] text-white/20 uppercase font-bold">Prevent CPU sleep during high traffic</p>
-                    </div>
-                    <button 
-                      onClick={() => setIsBackgroundPersistent(!isBackgroundPersistent)}
-                      className={`w-10 h-5 rounded-full relative transition-all ${isBackgroundPersistent ? 'bg-blue-600' : 'bg-white/10'}`}
-                    >
-                      <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${isBackgroundPersistent ? 'left-5.5' : 'left-0.5'}`} />
-                    </button>
+              <GlassCard className="border-white/10 bg-black/20 shadow-2xl">
+                <div className="flex items-center gap-4 mb-8">
+                   <Globe size={20} className="text-blue-500" />
+                   <span className="text-[11px] font-black uppercase tracking-[0.3em] text-white/80">Production Webhook</span>
+                </div>
+                <div className="space-y-6">
+                  <div className="space-y-2.5">
+                    <label className="text-[10px] font-black text-white/25 uppercase tracking-[0.25em] ml-1">Endpoint URL</label>
+                    <input className="w-full p-5 bg-black/60 rounded-3xl text-xs font-mono border border-white/10 text-white outline-none focus:border-blue-500/50 transition-colors shadow-inner" value={config.webhookUrl} onChange={(e) => setConfig({...config, webhookUrl: e.target.value})} />
                   </div>
-                  <div className="p-3 rounded-xl bg-green-500/5 border border-green-500/10">
-                    <p className="text-[8px] font-black text-green-400 uppercase tracking-widest mb-1">Android Requirement</p>
-                    <p className="text-[9px] text-white/40 leading-relaxed italic">The native build must register a 'ForegroundService' to maintain this heartbeat in the background.</p>
+                  <div className="space-y-2.5">
+                    <label className="text-[10px] font-black text-white/25 uppercase tracking-[0.25em] ml-1">Hardware Secret</label>
+                    <input type="password" placeholder="••••••••••••••••" className="w-full p-5 bg-black/60 rounded-3xl text-xs font-mono border border-white/10 text-blue-400 outline-none focus:border-blue-500/50 transition-colors shadow-inner" value={config.secretKey} onChange={(e) => setConfig({...config, secretKey: e.target.value})} />
                   </div>
                 </div>
               </GlassCard>
 
-              {lastError && (
-                <div className={`p-4 rounded-2xl border flex flex-col gap-3 animate-in fade-in ${webhookStatus === 'restricted' ? 'bg-blue-500/10 border-blue-500/20' : 'bg-red-500/10 border-red-500/20'}`}>
-                  <div className="flex items-start gap-3">
-                    {webhookStatus === 'restricted' ? <ServerCrash size={18} className="text-blue-400 mt-1 shrink-0" /> : <AlertTriangle size={18} className="text-red-400 mt-1 shrink-0" />}
-                    <div>
-                      <p className={`text-[10px] font-black uppercase tracking-widest ${webhookStatus === 'restricted' ? 'text-blue-400' : 'text-red-400'}`}>
-                        {webhookStatus === 'restricted' ? 'Diagnostic Handshake Success' : 'Endpoint Synchronisation Failed'}
-                      </p>
-                      <p className="text-[9px] text-white/80 mt-1 leading-relaxed">{lastError}</p>
-                    </div>
-                  </div>
-                  {showFixSnippet && (
-                    <div className="mt-2 p-3 bg-black/40 rounded-xl border border-white/5">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest flex items-center gap-1">
-                          <Code2 size={10} /> Endpoint.php CORS Fix
-                        </span>
-                        <button onClick={() => {
-                          navigator.clipboard.writeText(`header("Access-Control-Allow-Origin: *");\nheader("Access-Control-Allow-Headers: Content-Type, Accept");\nheader("Content-Type: application/json");`);
-                          alert("Fix snippet copied!");
-                        }} className="text-white/20 hover:text-white"><Copy size={12} /></button>
-                      </div>
-                      <pre className="text-[7px] font-mono text-white/40 overflow-x-auto p-2 bg-black/20 rounded-lg">
-                        {`header("Access-Control-Allow-Origin: *");\nheader("Access-Control-Allow-Headers: Content-Type, Accept");\nheader("Content-Type: application/json");`}
-                      </pre>
-                    </div>
-                  )}
+              <GlassCard className="border-white/10 bg-black/20">
+                <div className="flex items-center gap-4 mb-8">
+                   <Smartphone size={20} className="text-blue-500" />
+                   <span className="text-[11px] font-black uppercase tracking-[0.3em] text-white/80">Labeling</span>
                 </div>
-              )}
-
-              <GlassCard title="Remote V6 Endpoint" icon={<Globe size={18} />}>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-white/30 uppercase tracking-widest ml-1">Webhook URL</label>
-                    <input className="w-full p-4 bg-black/40 rounded-2xl text-xs font-mono border border-white/10 focus:border-blue-500/50 focus:outline-none text-white" placeholder="https://your-api.com/v6/sms.php" value={config.webhookUrl} onChange={(e) => setConfig({...config, webhookUrl: e.target.value})} />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black text-white/30 uppercase tracking-widest ml-1">API Secret Key</label>
-                    <div className="relative">
-                      <input type={showSecret ? "text" : "password"} className="w-full p-4 bg-black/40 rounded-2xl text-xs font-mono border border-white/10 focus:border-blue-500/50 focus:outline-none text-blue-400 pr-12" value={config.secretKey} onChange={(e) => setConfig({...config, secretKey: e.target.value})} />
-                      <button onClick={() => setShowSecret(!showSecret)} className="absolute right-4 top-1/2 -translate-y-1/2 text-white/20 hover:text-blue-400 transition-colors">{showSecret ? <EyeOff size={18} /> : <Eye size={18} />}</button>
-                    </div>
-                  </div>
+                <div className="grid grid-cols-2 gap-4">
+                   <div className="space-y-2.5">
+                     <label className="text-[9px] font-black text-white/25 uppercase tracking-[0.2em] ml-1">SIM SLOT 1</label>
+                     <input className="w-full p-5 bg-black/60 rounded-2xl text-[11px] font-bold border border-white/10 text-white outline-none focus:border-blue-500/50 shadow-inner" value={config.simNicknames.slot1} onChange={(e) => setConfig({...config, simNicknames: {...config.simNicknames, slot1: e.target.value}})} />
+                   </div>
+                   <div className="space-y-2.5">
+                     <label className="text-[9px] font-black text-white/25 uppercase tracking-[0.2em] ml-1">SIM SLOT 2</label>
+                     <input className="w-full p-5 bg-black/60 rounded-2xl text-[11px] font-bold border border-white/10 text-white outline-none focus:border-blue-500/50 shadow-inner" value={config.simNicknames.slot2} onChange={(e) => setConfig({...config, simNicknames: {...config.simNicknames, slot2: e.target.value}})} />
+                   </div>
                 </div>
               </GlassCard>
 
               <button 
-                onClick={() => {
-                  alert("Bridge Active: Service will remain persistent in background.");
-                  setIsServiceActive(true);
-                }}
-                className="w-full py-5 rounded-[28px] bg-blue-600 font-black text-sm shadow-xl shadow-blue-600/20 active:scale-95 transition-transform flex items-center justify-center gap-2 text-white uppercase tracking-widest"
+                onClick={handleSaveToNative}
+                disabled={isSyncing}
+                className="w-full py-7 rounded-[40px] bg-blue-600 font-black text-sm shadow-[0_20px_50px_#2563eb44] active:scale-[0.97] transition-all flex items-center justify-center gap-4 text-white uppercase tracking-[0.3em] mt-6 group relative overflow-hidden"
               >
-                <Zap size={16} className="fill-white" />
-                INITIATE PERSISTENT BRIDGE
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-200%] animate-shimmer" />
+                {isSyncing ? <RefreshCw size={22} className="animate-spin" /> : <ShieldCheck size={22} />}
+                <span className="relative z-10">{isSyncing ? 'Linking...' : 'Sync & Lock'}</span>
               </button>
             </div>
           </div>
         )}
-
       </div>
 
-      <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bottom-nav-glass h-24 px-10 pb-6 flex items-center justify-between z-[150]">
+      {/* Floating Bottom Navigation */}
+      <div className="fixed bottom-10 left-6 right-6 h-22 glass rounded-[44px] flex items-center justify-around px-6 border border-white/15 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.6)] z-[150] max-w-[400px] mx-auto backdrop-blur-3xl overflow-hidden">
+        <div className="absolute inset-0 bg-blue-500/5 pointer-events-none" />
         {[
-          { id: 'home', icon: <LayoutDashboard size={24} />, label: 'DASH' },
-          { id: 'activity', icon: <Activity size={24} />, label: 'LOGS' },
-          { id: 'settings', icon: <Settings size={24} />, label: 'SETUP' },
+          { id: 'home', icon: <LayoutDashboard size={26} />, label: 'Nodes' },
+          { id: 'activity', icon: <Activity size={26} />, label: 'Audit' },
+          { id: 'settings', icon: <Settings size={26} />, label: 'HW-CFG' },
         ].map((tab) => (
           <button 
             key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`flex flex-col items-center gap-1.5 transition-all duration-300 ${activeTab === tab.id ? 'text-blue-500 scale-110' : 'text-white/20 hover:text-white/40'}`}
+            onClick={() => {
+              setActiveTab(tab.id as any);
+              if ('vibrate' in navigator) navigator.vibrate(10);
+            }}
+            className={`flex flex-col items-center gap-2 transition-all duration-500 relative ${activeTab === tab.id ? 'text-blue-500' : 'text-white/20 hover:text-white/40'}`}
           >
-            <div className={`p-2.5 rounded-2xl transition-all duration-500 ${activeTab === tab.id ? 'bg-blue-500/20 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : ''}`}>
+            {activeTab === tab.id && (
+              <div className="absolute -top-1 w-12 h-12 bg-blue-500/20 blur-2xl rounded-full" />
+            )}
+            <div className={`p-3 rounded-2xl transition-all duration-500 ${activeTab === tab.id ? 'bg-blue-500/15 scale-110 shadow-inner' : ''}`}>
               {tab.icon}
             </div>
-            <span className="text-[8px] font-black uppercase tracking-[0.2em]">{tab.label}</span>
+            <span className="text-[9px] font-black uppercase tracking-[0.25em]">{tab.label}</span>
           </button>
         ))}
-      </nav>
+      </div>
     </div>
   );
 };
